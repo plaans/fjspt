@@ -4,7 +4,7 @@ mod search;
 
 use aries_solver::prelude::*;
 
-use crate::problem::{Encoding, OperationId, Problem, ProblemKind};
+use crate::problem::{Encoding, OperationId, Problem};
 use crate::search::{SearchStrategy, Solver, VarLbl};
 use anyhow::Context;
 use aries_bench_data::IntermediateResult;
@@ -13,13 +13,10 @@ use std::fmt::Write;
 use std::path::Path;
 use std::time::{Duration, Instant};
 use structopt::StructOpt;
-use walkdir::WalkDir;
 
 #[derive(Debug, StructOpt)]
 #[structopt(name = "aries-scheduler")]
 pub struct Opt {
-    /// Kind of the problem to be solved in {jobshop, openshop, flexible}
-    kind: ProblemKind,
     /// File containing the instance to solve.
     files: Vec<String>,
     /// Output file to write the solution
@@ -49,9 +46,6 @@ pub struct Opt {
     /// Indicates a layout file, containing a matrix with the transportation times between all pairs of machines.
     #[structopt(long = "layout")]
     layout_file: Option<String>,
-    /// Indicates a maximum delay (time lag) between two operations of the same job
-    #[structopt(long = "time-lag")]
-    time_lag: Option<u32>,
 }
 
 fn main() -> anyhow::Result<()> {
@@ -67,42 +61,24 @@ fn main() -> anyhow::Result<()> {
     let opt = Opt::from_args();
 
     for file in &opt.files {
-        if std::fs::metadata(file)?.is_file() {
-            solve(opt.kind, file, &opt)?;
-        } else {
-            for entry in WalkDir::new(file).follow_links(true).into_iter().filter_map(|e| e.ok()) {
-                let f_name = entry.file_name().to_string_lossy();
-                if f_name.ends_with(".txt") {
-                    println!("{f_name}");
-                    solve(opt.kind, &entry.path().to_string_lossy(), &opt)?;
-                }
-            }
-        }
+        solve(file, &opt)?;
     }
     Ok(())
 }
 
-fn solve(kind: ProblemKind, instance: &str, opt: &Opt) -> anyhow::Result<()> {
+fn solve(instance: &str, opt: &Opt) -> anyhow::Result<()> {
     let deadline = opt
         .timeout
         .map(|dur| SearchLimit::Deadline(Instant::now() + Duration::from_secs(dur as u64)))
         .unwrap_or(SearchLimit::None);
     let start_time = std::time::Instant::now();
     let filecontent = read_file(instance)?;
-    let mut pb = match kind {
-        ProblemKind::OpenShop => parser::openshop(&filecontent),
-        ProblemKind::JobShop => parser::jobshop(&filecontent),
-        ProblemKind::FlexibleShop => parser::flexshop(&filecontent),
-    };
+    let mut pb = parser::flexshop(&filecontent);
     if let Some(layout) = opt.layout_file.as_ref() {
         let file_content = read_file(layout)?;
         let transport_times = parser::transport_time(&file_content);
         pb.set_transport_times(transport_times);
     }
-    if let Some(time_lag) = opt.time_lag {
-        pb.set_time_lag(time_lag);
-    }
-    assert_eq!(pb.kind, kind);
     // println!("{:?}", pb);
 
     let lower_bound = (opt.lower_bound.unwrap_or(0)).max(pb.makespan_lower_bound() as u32);
@@ -143,7 +119,12 @@ fn solve(kind: ProblemKind, instance: &str, opt: &Opt) -> anyhow::Result<()> {
                     "The makespan found ({optimum}) is not the expected one ({expected})"
                 );
             };
-            println!("XX\t{}\t{}\t{}", instance, optimum, start_time.elapsed().as_secs_f64());
+            println!(
+                "XX\t{}\t{}\t{}",
+                instance,
+                optimum,
+                start_time.elapsed().as_secs_f64()
+            );
             aries_bench_data::SolveStatus::SolvedOpt
         }
         Ok(None) => {
@@ -183,10 +164,9 @@ fn solve(kind: ProblemKind, instance: &str, opt: &Opt) -> anyhow::Result<()> {
             problem.flags.insert("ub".to_string(), ub.to_string());
         }
         if let Some(layout) = opt.layout_file.as_ref() {
-            problem.flags.insert("layout".to_string(), layout.to_string());
-        }
-        if let Some(time_lag) = opt.time_lag {
-            problem.flags.insert("time-lag".to_string(), time_lag.to_string());
+            problem
+                .flags
+                .insert("layout".to_string(), layout.to_string());
         }
 
         let result = aries_bench_data::SolveResult {
@@ -249,12 +229,12 @@ fn export(solution: &Solution, pb: &Problem, encoding: &Encoding, file: Option<&
 }
 
 fn read_file(file: impl AsRef<Path>) -> anyhow::Result<String> {
-    std::fs::read_to_string(file.as_ref()).with_context(move || format!("Cannot read file: '{:?}'", file.as_ref()))
+    std::fs::read_to_string(file.as_ref())
+        .with_context(move || format!("Cannot read file: '{:?}'", file.as_ref()))
 }
 
 #[cfg(test)]
 mod test {
-    use crate::problem::ProblemKind;
     use crate::search::VarLbl;
     use crate::{parser, problem};
     use aries_solver::core::state::witness;
@@ -267,7 +247,12 @@ mod test {
 
     /// Solve the problem multiple with different random variable ordering, ensuring that all results are as expected.
     /// It also set up solution witness to check that no learned clause prune valid solutions.
-    fn random_solves<S: Label>(model: &Model<S>, objective: Var, num_solves: u32, expected_result: Option<IntCst>) {
+    fn random_solves<S: Label>(
+        model: &Model<S>,
+        objective: Var,
+        num_solves: u32,
+        expected_result: Option<IntCst>,
+    ) {
         // when this object goes out of scope, any witness solution for the current thread will be removed
         let _clean_up = witness::on_drop_witness_cleaner();
         for seed in 0..num_solves {
@@ -305,14 +290,9 @@ mod test {
         }
     }
 
-    fn run_tests(kind: ProblemKind, instance: &str, opt: u32, num_reps: u32, use_constraints: bool) {
+    fn run_tests(instance: &str, opt: u32, num_reps: u32, use_constraints: bool) {
         let filecontent = std::fs::read_to_string(instance).expect("Cannot read file");
-        let pb = match kind {
-            ProblemKind::OpenShop => parser::openshop(&filecontent),
-            ProblemKind::JobShop => parser::jobshop(&filecontent),
-            ProblemKind::FlexibleShop => parser::flexshop(&filecontent),
-        };
-        assert_eq!(pb.kind, kind);
+        let pb = parser::flexshop(&filecontent);
         let propagation_level = if use_constraints {
             no_overlap::PropagatorKind::default()
         } else {
@@ -322,7 +302,8 @@ mod test {
         let lower_bound = pb.makespan_lower_bound() as u32;
 
         // produce a model for this problem
-        let (model, _encoding) = problem::encode(&pb, lower_bound, Some(opt * 2), propagation_level);
+        let (model, _encoding) =
+            problem::encode(&pb, lower_bound, Some(opt * 2), propagation_level);
         let makespan: Var = model.shape.get_variable(&VarLbl::Makespan).unwrap();
 
         // run several random solvers on the problem to assert the coherency of the results
@@ -330,56 +311,22 @@ mod test {
     }
 
     #[test]
-    fn test_ft06_basic() {
-        run_tests(ProblemKind::JobShop, "instances/jobshop/ft06.jsp", 55, 10, false);
-    }
-
-    #[test]
-    fn test_ft06_constraints() {
-        run_tests(ProblemKind::JobShop, "instances/jobshop/ft06.jsp", 55, 10, true);
-    }
-
-    #[test]
     fn test_fjs_edata_mt06_basic() {
-        run_tests(
-            ProblemKind::FlexibleShop,
-            "instances/flexible/hu/edata/mt06.fjs",
-            55,
-            10,
-            false,
-        );
+        run_tests("instances/flexible/hu/edata/mt06.fjs", 55, 10, false);
     }
 
     #[test]
     fn test_fjs_edata_mt06_constraints() {
-        run_tests(
-            ProblemKind::FlexibleShop,
-            "instances/flexible/hu/edata/mt06.fjs",
-            55,
-            10,
-            true,
-        );
+        run_tests("instances/flexible/hu/edata/mt06.fjs", 55, 10, true);
     }
 
     #[test]
     fn test_fjs_rdata_mt06_basic() {
-        run_tests(
-            ProblemKind::FlexibleShop,
-            "instances/flexible/hu/rdata/mt06.fjs",
-            47,
-            10,
-            false,
-        );
+        run_tests("instances/flexible/hu/rdata/mt06.fjs", 47, 10, false);
     }
 
     #[test]
     fn test_fjs_rdata_mt06_constraints() {
-        run_tests(
-            ProblemKind::FlexibleShop,
-            "instances/flexible/hu/rdata/mt06.fjs",
-            47,
-            10,
-            true,
-        );
+        run_tests("instances/flexible/hu/rdata/mt06.fjs", 47, 10, true);
     }
 }

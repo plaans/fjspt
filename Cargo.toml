@@ -10,7 +10,6 @@ structopt = "*"
 anyhow = "*"
 aries-solver = { git = "https://github.com/plaans/aries.git" }
 aries-bench-data = { git = "https://github.com/plaans/aries.git" }
-walkdir = "*"
 
 
 [[bin]]
