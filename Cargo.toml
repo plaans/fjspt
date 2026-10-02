@@ -1,0 +1,18 @@
+[package]
+name = "aries_scheduling"
+version = "0.1.0"
+authors = ["Arthur Bit-Monnot <abitmonnot@laas.fr>"]
+edition = "2024"
+
+[dependencies]
+itertools = "*"
+structopt = "*"
+anyhow = "*"
+aries-solver = { git = "https://github.com/plaans/aries.git" }
+aries-bench-data = { git = "https://github.com/plaans/aries.git" }
+walkdir = "*"
+
+
+[[bin]]
+name = "scheduler"
+path = "src/main.rs"
