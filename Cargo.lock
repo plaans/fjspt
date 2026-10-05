@@ -26,7 +26,7 @@ checksum = "330a5ed07fa54e4702c9d6c4174f74427fc0ef6e214bbd677ae50a5099946470"
 [[package]]
 name = "aries-bench-data"
 version = "0.1.0"
-source = "git+https://github.com/plaans/aries.git#4eed6b6560466b10e3b71b4baf272d32da64f675"
+source = "git+https://github.com/plaans/aries.git#ede4c5b1d42f5cfb07dce180b4cb4a26b73c1b9d"
 dependencies = [
  "anyhow",
  "serde",
@@ -36,7 +36,7 @@ dependencies = [
 [[package]]
 name = "aries-env-param"
 version = "0.1.0"
-source = "git+https://github.com/plaans/aries.git#4eed6b6560466b10e3b71b4baf272d32da64f675"
+source = "git+https://github.com/plaans/aries.git#ede4c5b1d42f5cfb07dce180b4cb4a26b73c1b9d"
 dependencies = [
  "once_cell",
 ]
@@ -44,7 +44,7 @@ dependencies = [
 [[package]]
 name = "aries-lp"
 version = "0.1.0"
-source = "git+https://github.com/plaans/aries.git#4eed6b6560466b10e3b71b4baf272d32da64f675"
+source = "git+https://github.com/plaans/aries.git#ede4c5b1d42f5cfb07dce180b4cb4a26b73c1b9d"
 dependencies = [
  "log",
  "sprs",
@@ -53,7 +53,7 @@ dependencies = [
 [[package]]
 name = "aries-solver"
 version = "0.6.0"
-source = "git+https://github.com/plaans/aries.git#4eed6b6560466b10e3b71b4baf272d32da64f675"
+source = "git+https://github.com/plaans/aries.git#ede4c5b1d42f5cfb07dce180b4cb4a26b73c1b9d"
 dependencies = [
  "aries-env-param",
  "aries-lp",

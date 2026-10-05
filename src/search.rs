@@ -20,6 +20,7 @@ pub enum VarLbl {
     Prec(OperationId, OperationId),
     /// Variable encoding whether an operation is part of the solution
     Presence(OperationId),
+    Other,
 }
 
 impl std::fmt::Display for VarLbl {
@@ -110,7 +111,10 @@ pub fn get_solver(mut base_solver: Solver, strategy: &SearchStrategy, pb: &Encod
 
     // creates a brancher for a given strategy
     let build_brancher = |strat: Strat| {
-        let brancher: Brancher<VarLbl> = Box::new(ConflictBasedBrancher::with(decision_lits.clone(), strat.params));
+        let brancher: Brancher<VarLbl> = Box::new(ConflictBasedBrancher::with(
+            decision_lits.clone(),
+            strat.params,
+        ));
         let (restart_period, restart_update) = match strat.mode {
             Mode::Stable => (2000, 1.2), // stable: few restarts
             Mode::Focused => (800, 1.0), // focused: always aggressive restarts
@@ -119,12 +123,13 @@ pub fn get_solver(mut base_solver: Solver, strategy: &SearchStrategy, pb: &Encod
     };
 
     // Bootstraping branching strategy: a greedy EST strategy to bootstrap the search
-    let first_est: Brancher<VarLbl> = Box::new(UntilFirstConflict::new(Box::new(EstBrancher::new(pb))));
+    let first_est: Brancher<VarLbl> =
+        Box::new(UntilFirstConflict::new(Box::new(EstBrancher::new(pb))));
     // main brancher (after first conflict and as long binary vars are not set): Conflict baed search (LRB, ...)
     let main_brancher = build_brancher(strat);
     // add last strategy to ensure that all variables are bound (main strategy only takes care of bineary decision variables)
     let final_brancher = Lexical::with_min().clone_to_box();
     let brancher = first_est.and_then(main_brancher).and_then(final_brancher);
-    base_solver.set_brancher_boxed(brancher);
+    // base_solver.set_brancher_boxed(brancher);
     base_solver
 }

@@ -1,6 +1,7 @@
 use crate::search::{Model, VarLbl};
 
 use aries_solver::core::u32_to_cst;
+use aries_solver::lang::exclusive_choice::exclu_choice;
 use aries_solver::reasoners::cp::no_overlap::{self, NoOverlapPropagator, Task};
 
 use aries_solver::prelude::*;
@@ -98,13 +99,18 @@ impl Problem {
             None
         };
         let max_transition_time = max_transition_time.unwrap_or(0) as IntCst;
+        // a single that goes to the
         self.jobs()
             .map(|j| {
-                self.ops_by_job(j)
-                    .map(|op| op.max_duration() + max_transition_time)
-                    .sum::<IntCst>()
+                // for each jo the robot move from BASE, then for each operation waits for the operation to finish + move to next,
+                // returning to BASE when finished
+                max_transition_time // move from initial loc
+                    + self
+                        .ops_by_job(j)
+                        .map(|op| op.max_duration() + max_transition_time) // wait for job to finish + move to next machine/final position
+                        .sum::<IntCst>()
             })
-            .sum()
+            .sum::<IntCst>()
     }
 
     /// Returns the required transportation time (if specified) to move between the two machines
@@ -352,6 +358,17 @@ pub(crate) fn encode(
             NoOverlapPropagator::new(tasks_on_machine).with_kind(no_overlap);
         m.enforce_user_propagator(no_overlap);
     }
+
+    #[derive(Clone, Copy)]
+    struct Transport {
+        from_machine: u32,
+        to_machine: u32,
+        presence: Lit,
+        start: VarCst,
+        duration: IntCst,
+    }
+    let mut transports = Vec::new();
+
     // enforce total order between tasks of the same job
     for j in pb.jobs() {
         let ops = e.operations_ids(j).collect_vec();
@@ -371,12 +388,68 @@ pub(crate) fn encode(
                     if let Some(transport_time) = pb.transport_time(a1.machine, a2.machine)
                         && transport_time > 0
                     {
-                        m.enforce_scoped(
-                            leq(a1.end() + (transport_time as IntCst), a2.start()),
-                            [a1.presence, a2.presence],
-                        );
+                        let both_present = m.conjunctive_scope(&[a1.presence, a2.presence]);
+                        let transport_start =
+                            m.new_optional_var(0, pb.makespan_upper_bound(), both_present);
+                        let transport_end = transport_start + transport_time;
+                        transports.push(Transport {
+                            from_machine: a1.machine,
+                            to_machine: a2.machine,
+                            presence: both_present,
+                            start: transport_start.into(),
+                            duration: transport_time as IntCst,
+                        });
+                        m.enforce_scoped(leq(a1.end(), transport_start), [both_present]);
+                        m.enforce_scoped(leq(transport_end, a2.start), [both_present]);
                     }
                 }
+            }
+        }
+    }
+    let num_robots = 10;
+    let mut transports_of_robots: Vec<Vec<Transport>> = vec![Vec::new(); num_robots];
+
+    for t in transports {
+        let mut alternatives = Vec::with_capacity(num_robots);
+        for r in 0..num_robots {
+            let present = m
+                .new_presence_variable(t.presence, crate::search::VarLbl::Other)
+                .true_lit();
+            let start = m.new_optional_variable(0, pb.makespan_upper_bound(), present);
+
+            let transport_by_robot = Transport {
+                from_machine: t.from_machine,
+                to_machine: t.to_machine,
+                presence: present,
+                start: start.into(),
+                duration: t.duration,
+            };
+            alternatives.push(transport_by_robot);
+            transports_of_robots[r].push(transport_by_robot);
+        }
+        // choose exactly one robot for the transport
+        m.enforce(alternative(t.start, alternatives.iter().map(|a| a.start)));
+    }
+    for r in 0..num_robots {
+        for (i, transport_i) in transports_of_robots[r].iter().enumerate() {
+            for transport_j in &transports_of_robots[r][i + 1..] {
+                // TODO: do we need to scope it?
+                m.enforce(exclu_choice(
+                    leq(
+                        transport_i.start
+                            + transport_i.duration
+                            + pb.transport_time(transport_i.to_machine, transport_j.from_machine)
+                                .unwrap(),
+                        transport_j.start,
+                    ),
+                    leq(
+                        transport_j.start
+                            + transport_j.duration
+                            + pb.transport_time(transport_j.to_machine, transport_i.from_machine)
+                                .unwrap(),
+                        transport_i.start,
+                    ),
+                ));
             }
         }
     }
