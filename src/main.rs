@@ -90,7 +90,8 @@ fn solve(instance: &str, opt: &Opt) -> anyhow::Result<()> {
     let result = solver.minimize_with_callback(
         makespan,
         |obj, sol| {
-            println!("New solution with makespan: {}", obj);
+            println!("\n=== new solution (makespan: {})\n", obj);
+            print_solution(sol, &pb, &encoding);
             solution_history.push(IntermediateResult {
                 timestamp: start_time.elapsed(),
                 objective: obj as i64,
@@ -101,6 +102,12 @@ fn solve(instance: &str, opt: &Opt) -> anyhow::Result<()> {
     );
     solver.print_stats();
     println!();
+
+    if let Some(solution) = best.as_ref() {
+        println!("\n===== Best Solution ====\n");
+        // export the solution to file if specified
+        print_solution(solution, &pb, &encoding);
+    }
 
     let status = match result {
         Ok(Some((obj, solution))) => {
@@ -114,12 +121,6 @@ fn solve(instance: &str, opt: &Opt) -> anyhow::Result<()> {
                     "The makespan found ({optimum}) is not the expected one ({expected})"
                 );
             };
-            println!(
-                "XX\t{}\t{}\t{}",
-                instance,
-                optimum,
-                start_time.elapsed().as_secs_f64()
-            );
             aries_bench_data::SolveStatus::SolvedOpt
         }
         Ok(None) => {
@@ -139,10 +140,6 @@ fn solve(instance: &str, opt: &Opt) -> anyhow::Result<()> {
             }
         },
     };
-    if let Some(solution) = best.as_ref() {
-        // export the solution to file if specified
-        print_solution(solution, &pb, &encoding);
-    }
 
     // print solve statistics to file (useful for benchmarking)
     if let Some(report_dir) = opt.report.as_ref() {
@@ -231,10 +228,13 @@ fn print_solution(solution: &Solution, pb: &Problem, encoding: &Encoding) {
                 alt.id.alt.unwrap(),
                 alt.machine
             );
-            // println!("    robot ->: {:?}", incoming_transport.map(|t| t.robot));
-            // println!("    Alt: {:?} (machine {})", alt.id, alt.machine);
         }
     }
+
+    println!(
+        "\n# Makespan: {}\n",
+        solution.eval(encoding.makespan).unwrap()
+    )
 }
 
 fn read_file(file: impl AsRef<Path>) -> anyhow::Result<String> {
