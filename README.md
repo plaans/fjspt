@@ -1,4 +1,5 @@
-Very simple solver for disjunctive scheduling problem that exploits the Aries solver.
+Simple solver for the Flexible Jobshop with Transportation Resources.
+It extends the flexible jobshop with the allocation of transport requirements to "robots".
 
 ### Usage
 
@@ -10,52 +11,23 @@ cargo build --release --bin scheduler
 This will produce an executable binary `target/release/scheduler` (target being at the root of this repository).
 
 ```shell
-./scheduler <problem-kind> <path/to/instance>
+./scheduler instances/flexible/hu/rdata/la02.fjs --layout instances/layouts/layout10.txt   --robots 6 --timeout 20
 ```
 
-Common scheduling instances will be found in the `instances/` folder.
-```shell
-#Solves the first OpenShop instance of Taillard
-./target/release/scheduler openshop examples/scheduling/instances/openshop/taillard/tai04_04_01.txt
+In general `./scheduler` can be replaced with `cargo run --release --` (things may be very slow without `--release`)
 
-# Solves the first JobShop instance of Lawrence
-./target/release/scheduler jobshop examples/scheduling/instances/jobshop/la01.txt
+### Data
 
-# Solves instances of flexible jobshop
-./target/release/scheduler flexible instances/flexible/hu/edata/la01.fjs
-```
+- `instances/flexible` -> standard flexible jobshop instances (very few very small, but one can look for `mt06.fjs`)
+- `instances/layouts` -> example layout files that specify the transit times between any pair of machines.
+
+
 
 
 ### Options
 
-```
-aries-scheduler 0.1.0
+Run with `--help` to get a list of command line options.
 
-USAGE:
-    scheduler [OPTIONS] <kind> <file>
-
-FLAGS:
-    -h, --help       Prints help information
-    -V, --version    Prints version information
-
-OPTIONS:
-        --expected-makespan <expected-makespan>
-            When set, the solver will fail with an exit code of 1 if the found solution does not have this makespan
-
-        --lower-bound <lower-bound>                 [default: 0]
-        --num-threads <num-threads>                Number of threads to allocate to search [default: 1]
-    -o, --output <output>                          Output file to write the solution
-        --search <search>                          Search strategy to use [default: default]
-    -t, --timeout <timeout>                        maximum runtime, in seconds
-        --upper-bound <upper-bound>                 [default: 100000]
-
-ARGS:
-    <kind>    Kind of the problem to be solved in {jobshop, openshop, flexible}
-    <file>    File containing the instance to solve
-
-```
-
-If known beforehand, the makespan of the optimal solution can be specified on the command line (e.g. `--expected-makespan 42`). If the solution found has a different makespan, the solver will exit with error code 1.
 
 ### Reference
 
