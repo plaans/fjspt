@@ -215,8 +215,11 @@ fn print_solution(solution: &Solution, pb: &Problem, encoding: &Encoding) {
                 let end = start + in_transport.duration;
 
                 println!(
-                    "  [{start}, {end}] transport({}, {} -> {}",
-                    in_transport.robot, in_transport.from_machine, in_transport.to_machine
+                    "  [{start}, {end}] transport(r: {}, j: {}, m: {} -> {})",
+                    in_transport.robot,
+                    in_transport.previous.job,
+                    in_transport.from_machine,
+                    in_transport.to_machine
                 );
             }
             let start = solution.eval(alt.start()).unwrap();

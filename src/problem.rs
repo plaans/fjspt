@@ -319,6 +319,16 @@ impl Encoding {
         self.transports.iter()
     }
 
+    pub fn transports_from(&self, op: OperationId) -> impl Iterator<Item = &Transport> {
+        self.transports().filter(move |t| t.previous == op)
+    }
+
+    pub fn transports_with_robots_from(
+        &self,
+        op: OperationId,
+    ) -> impl Iterator<Item = &TransportWithRobot> {
+        self.transports_from(op).flat_map(|t| t.alternatives.iter())
+    }
     pub fn transports_to(&self, op: OperationId) -> impl Iterator<Item = &Transport> {
         self.transports().filter(move |t| t.next == op)
     }
@@ -394,7 +404,7 @@ pub(crate) fn encode(
             for a1 in e.alternatives(j, op1) {
                 for a2 in e.alternatives(j, op2) {
                     if let Some(transport_time) = pb.transport_time(a1.machine, a2.machine)
-                        && transport_time > 0
+                    // && transport_time > 0
                     {
                         let both_present = m.conjunctive_scope(&[a1.presence, a2.presence]);
                         let transport_start =
@@ -478,6 +488,32 @@ pub(crate) fn encode(
                     [transport_i.presence, transport_j.presence],
                 );
             }
+        }
+    }
+
+    // redundant constraints that strengthen propagation between the transports and the alternative tasks that come before/after
+    for alt in e.all_alternatives() {
+        let incoming_transports = e
+            .transports_with_robots_to(alt.id)
+            .map(|transport| transport.start + transport.duration)
+            .collect_vec();
+
+        if !incoming_transports.is_empty() {
+            let transport_end = m.new_optional_variable(0, upper_bound, alt.presence);
+            m.enforce(alternative(transport_end, incoming_transports));
+            m.enforce_scoped(leq(transport_end, alt.start), [alt.presence]);
+        }
+    }
+    for alt in e.all_alternatives() {
+        let outgoing_transports = e
+            .transports_with_robots_from(alt.id)
+            .map(|transport| transport.start)
+            .collect_vec();
+
+        if !outgoing_transports.is_empty() {
+            let transport_start = m.new_optional_variable(0, upper_bound, alt.presence);
+            m.enforce(alternative(transport_start, outgoing_transports));
+            m.enforce_scoped(leq(alt.end(), transport_start), [alt.presence]);
         }
     }
 

@@ -10,6 +10,8 @@ structopt = "*"
 anyhow = "*"
 aries-solver = { git = "https://github.com/plaans/aries.git" }
 aries-bench-data = { git = "https://github.com/plaans/aries.git" }
+# aries-solver = { path = "/home/abitmonnot/tmp/fixaries/solver" }
+# aries-bench-data = { path = "/home/abitmonnot/tmp/fixaries/bench/data" }
 
 [profile.release]
 debug = true
