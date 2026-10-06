@@ -4,12 +4,11 @@ mod search;
 
 use aries_solver::prelude::*;
 
-use crate::problem::{Encoding, OperationId, Problem};
-use crate::search::{SearchStrategy, Solver, VarLbl};
+use crate::problem::{Encoding, Problem};
+use crate::search::{SearchStrategy, Solver};
 use anyhow::Context;
 use aries_bench_data::IntermediateResult;
 use aries_solver::solver::{Exit, SearchLimit};
-use std::fmt::Write;
 use std::path::Path;
 use std::time::{Duration, Instant};
 use structopt::StructOpt;
@@ -19,9 +18,11 @@ use structopt::StructOpt;
 pub struct Opt {
     /// File containing the instance to solve.
     files: Vec<String>,
-    /// Output file to write the solution
-    #[structopt(long = "output", short = "o")]
-    output: Option<String>,
+    /// Indicates a layout file, containing a matrix with the transportation times between all pairs of machines.
+    #[structopt(long = "layout")]
+    layout_file: Option<String>,
+    #[structopt(long = "robots")]
+    num_robots: usize,
     /// When set, the solver will fail with an exit code of 1 if the found solution does not have this makespan.
     #[structopt(long = "expected-makespan")]
     expected_makespan: Option<u32>,
@@ -39,13 +40,6 @@ pub struct Opt {
     /// This option is intended to ease the collection of benchmark results with `aries-bench`
     #[structopt(long = "report", short = "r")]
     report: Option<String>,
-    /// Choose the propagation level for the no-overlap constraint.
-    /// Options: try it out, you will get an error message with the options
-    #[structopt(long = "no-overlap", default_value = "edge-finding")]
-    no_overlap: aries_solver::reasoners::cp::no_overlap::PropagatorKind,
-    /// Indicates a layout file, containing a matrix with the transportation times between all pairs of machines.
-    #[structopt(long = "layout")]
-    layout_file: Option<String>,
 }
 
 fn main() -> anyhow::Result<()> {
@@ -79,13 +73,14 @@ fn solve(instance: &str, opt: &Opt) -> anyhow::Result<()> {
         let transport_times = parser::transport_time(&file_content);
         pb.set_transport_times(transport_times);
     }
+    pb.num_robots = opt.num_robots;
     // println!("{:?}", pb);
 
     let lower_bound = (opt.lower_bound.unwrap_or(0)).max(pb.makespan_lower_bound() as u32);
     println!("Initial lower bound: {lower_bound}");
 
-    let (model, encoding) = problem::encode(&pb, lower_bound, opt.upper_bound, opt.no_overlap);
-    let makespan: Var = model.shape.get_variable(&VarLbl::Makespan).unwrap();
+    let (model, encoding) = problem::encode(&pb, lower_bound, opt.upper_bound);
+    let makespan: Var = encoding.makespan;
 
     let solver = Solver::new(model);
     let mut solver = search::get_solver(solver, &opt.search, &encoding);
@@ -146,8 +141,10 @@ fn solve(instance: &str, opt: &Opt) -> anyhow::Result<()> {
     };
     if let Some(solution) = best.as_ref() {
         // export the solution to file if specified
-        export(solution, &pb, &encoding, opt.output.as_ref());
+        print_solution(solution, &pb, &encoding);
     }
+
+    // print solve statistics to file (useful for benchmarking)
     if let Some(report_dir) = opt.report.as_ref() {
         let mut problem = aries_bench_data::Problem {
             name: instance.to_string(),
@@ -157,6 +154,9 @@ fn solve(instance: &str, opt: &Opt) -> anyhow::Result<()> {
                 .unwrap_or(Duration::MAX),
             flags: Default::default(),
         };
+        problem
+            .flags
+            .insert("num_robots".to_string(), opt.num_robots.to_string());
         if let Some(lb) = opt.lower_bound {
             problem.flags.insert("lb".to_string(), lb.to_string());
         }
@@ -198,135 +198,43 @@ fn solve(instance: &str, opt: &Opt) -> anyhow::Result<()> {
 }
 
 /// Write the solution to file if the file is not None
-fn export(solution: &Solution, pb: &Problem, encoding: &Encoding, file: Option<&String>) {
-    if let Some(output_file) = file {
-        let mut formatted_solution = String::new();
-        for m in pb.machines() {
-            // all tasks on this machine
-            let mut tasks = Vec::new();
-            for alt in encoding.alternatives_on_machine(m) {
-                if solution.entails(alt.presence) {
-                    let start_time = solution.var_domain(alt.start).lb;
-                    tasks.push((alt.id, start_time));
-                }
-            }
-            // sort task by their start time
-            tasks.sort_by_key(|(_task, start_time)| *start_time);
-            write!(formatted_solution, "Machine {m}:\t").unwrap();
-            for (OperationId { job, op, alt }, _) in tasks {
-                let alt = alt.unwrap();
-                write!(formatted_solution, "({job}, {op}, {alt})\t").unwrap();
-            }
-            writeln!(formatted_solution).unwrap();
-        }
-        // println!("\n=== Solution (resource order) ===");
-        // print!("{}", formatted_solution);
-        // println!("=================================\n");
+fn print_solution(solution: &Solution, pb: &Problem, encoding: &Encoding) {
+    for job in pb.jobs() {
+        println!("Job: {job}");
+        for op in encoding.operations_ids(job) {
+            let alt = encoding
+                .alternatives(job, op)
+                .find(|alt| solution.entails(alt.presence))
+                .unwrap();
 
-        // write solution to file
-        std::fs::write(output_file, formatted_solution).unwrap();
+            let incoming_transport = encoding
+                .transports_with_robots_to(alt.id)
+                .find(|t| solution.entails(t.presence));
+            if let Some(in_transport) = incoming_transport {
+                let start = solution.eval(in_transport.start).unwrap();
+                let end = start + in_transport.duration;
+
+                println!(
+                    "  [{start}, {end}] transport({}, {} -> {}",
+                    in_transport.robot, in_transport.from_machine, in_transport.to_machine
+                );
+            }
+            let start = solution.eval(alt.start()).unwrap();
+            let end = solution.eval(alt.end()).unwrap();
+            println!(
+                "  [{start}, {end}] process(j: {}, op: {}, alt: {}, m: {})",
+                alt.id.job,
+                alt.id.op,
+                alt.id.alt.unwrap(),
+                alt.machine
+            );
+            // println!("    robot ->: {:?}", incoming_transport.map(|t| t.robot));
+            // println!("    Alt: {:?} (machine {})", alt.id, alt.machine);
+        }
     }
 }
 
 fn read_file(file: impl AsRef<Path>) -> anyhow::Result<String> {
     std::fs::read_to_string(file.as_ref())
         .with_context(move || format!("Cannot read file: '{:?}'", file.as_ref()))
-}
-
-#[cfg(test)]
-mod test {
-    use crate::search::VarLbl;
-    use crate::{parser, problem};
-    use aries_solver::core::state::witness;
-    use aries_solver::model::Label;
-    use aries_solver::model::Model;
-    use aries_solver::prelude::*;
-    use aries_solver::reasoners::cp::no_overlap;
-    use aries_solver::solver::search::random::RandomChoice;
-    use aries_solver::solver::{SearchLimit, Solver};
-
-    /// Solve the problem multiple with different random variable ordering, ensuring that all results are as expected.
-    /// It also set up solution witness to check that no learned clause prune valid solutions.
-    fn random_solves<S: Label>(
-        model: &Model<S>,
-        objective: Var,
-        num_solves: u32,
-        expected_result: Option<IntCst>,
-    ) {
-        // when this object goes out of scope, any witness solution for the current thread will be removed
-        let _clean_up = witness::on_drop_witness_cleaner();
-        for seed in 0..num_solves {
-            let model = model.clone();
-            let solver = &mut Solver::new(model);
-            solver.set_brancher(RandomChoice::new(seed as u64));
-            let result = if let Some((makespan, assignment)) = solver
-                .minimize_with_callback(
-                    objective,
-                    |makespan, _| {
-                        if expected_result == Some(makespan) {
-                            // we have found the expected solution, remove the witness because the current solution
-                            // will be disallowed to force an improvement
-                            witness::remove_solution_witness()
-                        }
-                    },
-                    SearchLimit::None,
-                )
-                .unwrap()
-            {
-                println!("[{seed}] SOL: {makespan:?}");
-
-                if expected_result == Some(makespan) {
-                    // we have the expected solution, save it to be checked against
-                    // when this is set, solver for the current thread will check that any learned clause does not
-                    // forbid this solution
-                    witness::set_solution_witness(assignment)
-                }
-
-                Some(makespan)
-            } else {
-                None
-            };
-            assert_eq!(expected_result, result);
-        }
-    }
-
-    fn run_tests(instance: &str, opt: u32, num_reps: u32, use_constraints: bool) {
-        let filecontent = std::fs::read_to_string(instance).expect("Cannot read file");
-        let pb = parser::flexshop(&filecontent);
-        let propagation_level = if use_constraints {
-            no_overlap::PropagatorKind::default()
-        } else {
-            no_overlap::PropagatorKind::None
-        };
-
-        let lower_bound = pb.makespan_lower_bound() as u32;
-
-        // produce a model for this problem
-        let (model, _encoding) =
-            problem::encode(&pb, lower_bound, Some(opt * 2), propagation_level);
-        let makespan: Var = model.shape.get_variable(&VarLbl::Makespan).unwrap();
-
-        // run several random solvers on the problem to assert the coherency of the results
-        random_solves(&model, makespan, num_reps, Some(opt as IntCst))
-    }
-
-    #[test]
-    fn test_fjs_edata_mt06_basic() {
-        run_tests("instances/flexible/hu/edata/mt06.fjs", 55, 10, false);
-    }
-
-    #[test]
-    fn test_fjs_edata_mt06_constraints() {
-        run_tests("instances/flexible/hu/edata/mt06.fjs", 55, 10, true);
-    }
-
-    #[test]
-    fn test_fjs_rdata_mt06_basic() {
-        run_tests("instances/flexible/hu/rdata/mt06.fjs", 47, 10, false);
-    }
-
-    #[test]
-    fn test_fjs_rdata_mt06_constraints() {
-        run_tests("instances/flexible/hu/rdata/mt06.fjs", 47, 10, true);
-    }
 }

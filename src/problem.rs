@@ -1,8 +1,7 @@
-use crate::search::{Model, VarLbl};
+#![allow(unused, clippy::needless_range_loop)]
 
 use aries_solver::core::u32_to_cst;
 use aries_solver::lang::exclusive_choice::exclu_choice;
-use aries_solver::reasoners::cp::no_overlap::{self, NoOverlapPropagator, Task};
 
 use aries_solver::prelude::*;
 
@@ -40,6 +39,7 @@ pub struct Problem {
     /// If set, indicates the transportation between any pair of machines.
     /// For instance `transport_time[3][5]` indicates the time necessary to transport a piece from machine `3` to machine `5`.
     pub transport_times: Option<Vec<Vec<u32>>>,
+    pub num_robots: usize,
 }
 
 impl Problem {
@@ -177,18 +177,41 @@ impl OperationAlternative {
         self.start + self.duration
     }
 }
+#[derive(Debug, Clone)]
+pub struct Transport {
+    pub from_machine: u32,
+    pub to_machine: u32,
+    pub previous: OperationId,
+    pub next: OperationId,
+    pub presence: Lit,
+    pub start: VarCst,
+    pub duration: IntCst,
+    pub alternatives: Vec<TransportWithRobot>,
+}
+#[derive(Clone, Copy, Debug)]
+pub struct TransportWithRobot {
+    pub from_machine: u32,
+    pub to_machine: u32,
+    pub previous: OperationId,
+    pub next: OperationId,
+    pub robot: u32,
+    pub presence: Lit,
+    pub start: VarCst,
+    pub duration: IntCst,
+}
 
 /// Encoding of a scheduling problem, where each operation and alternative is associated with its variables in the CSP.
 #[derive(Clone)]
 pub struct Encoding {
-    makespan: Var,
+    pub makespan: Var,
     operations: Vec<Operation>,
     alternatives: Vec<OperationAlternative>,
+    transports: Vec<Transport>,
 }
 
 impl Encoding {
     pub fn new(pb: &Problem, lower_bound: IntCst, upper_bound: IntCst, m: &mut Model) -> Self {
-        let makespan = m.new_ivar(lower_bound, upper_bound, VarLbl::Makespan);
+        let makespan = m.new_variable(lower_bound, upper_bound);
 
         let mut operations = Vec::new();
         let mut alternatives = Vec::new();
@@ -206,10 +229,9 @@ impl Encoding {
                 let presence = if op.alternatives.len() == 1 {
                     Lit::TRUE
                 } else {
-                    m.new_presence_variable(Lit::TRUE, VarLbl::Presence(id))
-                        .true_lit()
+                    m.new_presence_variable(Lit::TRUE, "").true_lit()
                 };
-                let start = m.new_optional_ivar(0, upper_bound, presence, VarLbl::Start(id));
+                let start = m.new_optional_ivar(0, upper_bound, presence, "");
                 alternatives.push(OperationAlternative {
                     id,
                     machine: alt.machine,
@@ -239,12 +261,8 @@ impl Encoding {
                 Operation {
                     job: job_id,
                     op: op_id,
-                    start: m
-                        .new_optional_ivar(0, upper_bound, Lit::TRUE, VarLbl::Start(id))
-                        .into(),
-                    end: m
-                        .new_optional_ivar(0, upper_bound, Lit::TRUE, VarLbl::Start(id))
-                        .into(),
+                    start: m.new_optional_variable(0, upper_bound, Lit::TRUE).into(),
+                    end: m.new_optional_variable(0, upper_bound, Lit::TRUE).into(),
                 }
             };
             operations.push(operation);
@@ -253,6 +271,7 @@ impl Encoding {
             makespan,
             operations,
             alternatives,
+            transports: Default::default(), // will be filled in later
         }
     }
 
@@ -295,20 +314,34 @@ impl Encoding {
         self.all_alternatives()
             .filter(move |a| a.machine == machine)
     }
+
+    pub fn transports(&self) -> impl Iterator<Item = &Transport> {
+        self.transports.iter()
+    }
+
+    pub fn transports_to(&self, op: OperationId) -> impl Iterator<Item = &Transport> {
+        self.transports().filter(move |t| t.next == op)
+    }
+
+    pub fn transports_with_robots_to(
+        &self,
+        op: OperationId,
+    ) -> impl Iterator<Item = &TransportWithRobot> {
+        self.transports_to(op).flat_map(|t| t.alternatives.iter())
+    }
 }
 
 pub(crate) fn encode(
     pb: &Problem,
     lower_bound: u32,
     upper_bound: Option<u32>,
-    no_overlap: no_overlap::PropagatorKind,
 ) -> (Model, Encoding) {
     let lower_bound = u32_to_cst(lower_bound);
     let upper_bound = upper_bound
         .map(u32_to_cst)
         .unwrap_or(pb.makespan_upper_bound());
     let mut m = Model::new();
-    let e = Encoding::new(pb, lower_bound, upper_bound, &mut m);
+    let mut e = Encoding::new(pb, lower_bound, upper_bound, &mut m);
 
     // enforce makespan after last alternative
     for oa in e.all_alternatives() {
@@ -336,37 +369,12 @@ pub(crate) fn encode(
 
     // for each machine, impose that any two alternatives do not overlap
     for machine in 0..(pb.num_machines) {
-        let alts = e.alternatives_on_machine(machine).collect_vec();
-        for (i, alt1) in alts.iter().enumerate() {
-            #[allow(clippy::needless_range_loop)]
-            for j in (i + 1)..alts.len() {
-                let alt2 = &alts[j];
-                // variable that is true if alt1 comes first and false otherwise.
-                // in any case, setting a value to it enforces that the two tasks do not overlap
-                let scope = m.get_conjunctive_scope(&[alt1.presence, alt2.presence]);
-                let prec = m.new_optional_bvar(scope, VarLbl::Prec(alt1.id, alt2.id));
-
-                m.enforce_if(prec.true_lit(), leq(alt1.end(), alt2.start));
-                m.enforce_if(prec.false_lit(), leq(alt2.end(), alt1.start));
-            }
-        }
-
-        let tasks_on_machine = alts
-            .iter()
-            .map(|op| Task::<VarCst>::new(op.start, op.duration, op.end(), op.presence));
-        let no_overlap: NoOverlapPropagator<VarCst> =
-            NoOverlapPropagator::new(tasks_on_machine).with_kind(no_overlap);
-        m.enforce_user_propagator(no_overlap);
+        m.enforce(no_overlap(
+            e.alternatives_on_machine(machine)
+                .map(|a| Interval::new_fixed_duration(a.start, a.duration)),
+        ));
     }
 
-    #[derive(Clone, Copy)]
-    struct Transport {
-        from_machine: u32,
-        to_machine: u32,
-        presence: Lit,
-        start: VarCst,
-        duration: IntCst,
-    }
     let mut transports = Vec::new();
 
     // enforce total order between tasks of the same job
@@ -392,13 +400,17 @@ pub(crate) fn encode(
                         let transport_start =
                             m.new_optional_var(0, pb.makespan_upper_bound(), both_present);
                         let transport_end = transport_start + transport_time;
-                        transports.push(Transport {
+                        let transport = Transport {
                             from_machine: a1.machine,
                             to_machine: a2.machine,
+                            previous: a1.id,
+                            next: a2.id,
                             presence: both_present,
                             start: transport_start.into(),
                             duration: transport_time as IntCst,
-                        });
+                            alternatives: Default::default(),
+                        };
+                        transports.push(transport);
                         m.enforce_scoped(leq(a1.end(), transport_start), [both_present]);
                         m.enforce_scoped(leq(transport_end, a2.start), [both_present]);
                     }
@@ -406,50 +418,65 @@ pub(crate) fn encode(
             }
         }
     }
-    let num_robots = 10;
-    let mut transports_of_robots: Vec<Vec<Transport>> = vec![Vec::new(); num_robots];
+    let num_robots = pb.num_robots;
+    let mut transports_of_robots: Vec<Vec<TransportWithRobot>> = vec![Vec::new(); num_robots];
 
-    for t in transports {
-        let mut alternatives = Vec::with_capacity(num_robots);
+    for mut t in transports {
         for r in 0..num_robots {
-            let present = m
-                .new_presence_variable(t.presence, crate::search::VarLbl::Other)
-                .true_lit();
+            let present = m.new_presence_variable(t.presence, "").true_lit();
             let start = m.new_optional_variable(0, pb.makespan_upper_bound(), present);
 
-            let transport_by_robot = Transport {
+            let transport_by_robot = TransportWithRobot {
                 from_machine: t.from_machine,
                 to_machine: t.to_machine,
+                previous: t.previous,
+                next: t.next,
+                robot: r as u32,
                 presence: present,
                 start: start.into(),
                 duration: t.duration,
             };
-            alternatives.push(transport_by_robot);
             transports_of_robots[r].push(transport_by_robot);
+            t.alternatives.push(transport_by_robot);
         }
         // choose exactly one robot for the transport
-        m.enforce(alternative(t.start, alternatives.iter().map(|a| a.start)));
+        m.enforce(alternative(t.start, t.alternatives.iter().map(|a| a.start)));
+
+        e.transports.push(t);
     }
     for r in 0..num_robots {
+        // for this robots, ensure that for any two transport tasks, they are not overlapping and
+        // there is sufficient delay between to allow the robot to move from the first's final machine to the second's start machine
         for (i, transport_i) in transports_of_robots[r].iter().enumerate() {
             for transport_j in &transports_of_robots[r][i + 1..] {
-                // TODO: do we need to scope it?
-                m.enforce(exclu_choice(
-                    leq(
-                        transport_i.start
-                            + transport_i.duration
-                            + pb.transport_time(transport_i.to_machine, transport_j.from_machine)
+                m.enforce_scoped(
+                    // one of those two must be satisfied
+                    exclu_choice(
+                        // start(ti) + dur(ti) + tt(mi, mj) <= start(tj)
+                        leq(
+                            transport_i.start
+                                + transport_i.duration
+                                + pb.transport_time(
+                                    transport_i.to_machine,
+                                    transport_j.from_machine,
+                                )
                                 .unwrap(),
-                        transport_j.start,
-                    ),
-                    leq(
-                        transport_j.start
-                            + transport_j.duration
-                            + pb.transport_time(transport_j.to_machine, transport_i.from_machine)
+                            transport_j.start,
+                        ),
+                        // start(tj) + dur(tj) + tt(mj, mi) <= start(ti)
+                        leq(
+                            transport_j.start
+                                + transport_j.duration
+                                + pb.transport_time(
+                                    transport_j.to_machine,
+                                    transport_i.from_machine,
+                                )
                                 .unwrap(),
-                        transport_i.start,
+                            transport_i.start,
+                        ),
                     ),
-                ));
+                    [transport_i.presence, transport_j.presence],
+                );
             }
         }
     }

@@ -54,6 +54,7 @@ pub(crate) fn flexshop(input: &str) -> Problem {
         num_machines,
         operations,
         transport_times: None,
+        num_robots: 0,
     }
 }
 
