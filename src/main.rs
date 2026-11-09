@@ -1,6 +1,7 @@
 mod parser;
 mod problem;
 mod search;
+mod stn;
 
 use aries_solver::prelude::*;
 
@@ -40,6 +41,9 @@ pub struct Opt {
     /// This option is intended to ease the collection of benchmark results with `aries-bench`
     #[structopt(long = "report", short = "r")]
     report: Option<String>,
+    /// If set, the best solution is exported to this file as an STN (partial-order schedule) in JSON.
+    #[structopt(long = "stn")]
+    stn_file: Option<String>,
 }
 
 fn main() -> anyhow::Result<()> {
@@ -107,6 +111,12 @@ fn solve(instance: &str, opt: &Opt) -> anyhow::Result<()> {
         println!("\n===== Best Solution ====\n");
         // export the solution to file if specified
         print_solution(solution, &pb, &encoding);
+
+        if let Some(stn_file) = opt.stn_file.as_ref() {
+            std::fs::write(stn_file, stn::export_stn(solution, &pb, &encoding))
+                .with_context(|| format!("Cannot write STN file: '{stn_file}'"))?;
+            println!("STN written to {stn_file}");
+        }
     }
 
     let status = match result {
