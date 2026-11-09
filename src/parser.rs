@@ -55,6 +55,10 @@ pub(crate) fn flexshop(input: &str) -> Problem {
         operations,
         transport_times: None,
         num_robots: 0,
+        robot_start_locations: vec![],
+        robot_end_locations: vec![],
+        item_start_locations: vec![],
+        item_end_locations: vec![],
     }
 }
 

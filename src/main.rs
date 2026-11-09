@@ -77,7 +77,14 @@ fn solve(instance: &str, opt: &Opt) -> anyhow::Result<()> {
         let transport_times = parser::transport_time(&file_content);
         pb.set_transport_times(transport_times);
     }
+    let robot_loc = pb.num_locations() - 1;
     pb.num_robots = opt.num_robots;
+    pb.robot_start_locations = vec![robot_loc; pb.num_robots];
+    pb.robot_end_locations = vec![Some(robot_loc); pb.num_robots];
+
+    let items_storage_location = pb.num_locations() - 2;
+    pb.item_start_locations = vec![items_storage_location; pb.num_jobs as usize];
+    pb.item_end_locations = vec![Some(items_storage_location); pb.num_jobs as usize];
     // println!("{:?}", pb);
 
     let lower_bound = (opt.lower_bound.unwrap_or(0)).max(pb.makespan_lower_bound() as u32);
@@ -224,9 +231,9 @@ fn print_solution(solution: &Solution, pb: &Problem, encoding: &Encoding) {
                 println!(
                     "  [{start}, {end}] transport(r: {}, j: {}, m: {} -> {})",
                     in_transport.robot,
-                    in_transport.previous.job,
-                    in_transport.from_machine,
-                    in_transport.to_machine
+                    in_transport.job(),
+                    in_transport.from_loc,
+                    in_transport.to_loc
                 );
             }
             let start = solution.eval(alt.start()).unwrap();
@@ -238,6 +245,22 @@ fn print_solution(solution: &Solution, pb: &Problem, encoding: &Encoding) {
                 alt.id.alt.unwrap(),
                 alt.machine
             );
+            // if there is transport with nothing after, print it as well
+            let outgoint_transport = encoding
+                .transports_with_robots_from(alt.id)
+                .find(|t| solution.entails(t.presence) && t.next.is_none());
+            if let Some(out_transport) = outgoint_transport {
+                let start = solution.eval(out_transport.start).unwrap();
+                let end = start + out_transport.duration;
+
+                println!(
+                    "  [{start}, {end}] transport(r: {}, j: {}, m: {} -> {})",
+                    out_transport.robot,
+                    out_transport.job(),
+                    out_transport.from_loc,
+                    out_transport.to_loc
+                );
+            }
         }
     }
 

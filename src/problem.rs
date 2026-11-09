@@ -31,6 +31,8 @@ pub struct Alt {
     pub duration: IntCst,
 }
 
+pub type Location = usize;
+
 #[derive(Clone, Debug)]
 pub struct Problem {
     pub num_jobs: u32,
@@ -40,6 +42,16 @@ pub struct Problem {
     /// For instance `transport_time[3][5]` indicates the time necessary to transport a piece from machine `3` to machine `5`.
     pub transport_times: Option<Vec<Vec<u32>>>,
     pub num_robots: usize,
+    /// Where each robot starts at time 0
+    pub robot_start_locations: Vec<Location>,
+    /// Where each robot must be at the end.
+    /// If None, the final position of the robot is unconstrained.
+    pub robot_end_locations: Vec<Option<Location>>,
+    /// Where the item processed by each job starts
+    pub item_start_locations: Vec<Location>,
+    /// Where each item must be at the end
+    /// If None, the final position of the item is unconstrained
+    pub item_end_locations: Vec<Option<Location>>,
 }
 
 impl Problem {
@@ -62,6 +74,10 @@ impl Problem {
     }
     pub fn jobs(&self) -> impl Iterator<Item = u32> {
         0..self.num_jobs
+    }
+
+    pub fn num_locations(&self) -> usize {
+        self.transport_times.as_ref().map(|x| x.len()).unwrap_or(0)
     }
 
     /// Computes a lower bound on the makespan as the maximum of the operation durations in each
@@ -114,10 +130,10 @@ impl Problem {
     }
 
     /// Returns the required transportation time (if specified) to move between the two machines
-    pub fn transport_time(&self, from_machine: u32, to_machine: u32) -> Option<u32> {
+    pub fn transport_time(&self, from_machine: Location, to_machine: Location) -> Option<u32> {
         if let Some(tt) = self.transport_times.as_ref() {
-            let line = &tt[from_machine as usize % tt.len()];
-            let time = line[to_machine as usize % line.len()];
+            let line = &tt[from_machine % tt.len()];
+            let time = line[to_machine % line.len()];
             Some(time)
         } else {
             None
@@ -179,10 +195,10 @@ impl OperationAlternative {
 }
 #[derive(Debug, Clone)]
 pub struct Transport {
-    pub from_machine: u32,
-    pub to_machine: u32,
-    pub previous: OperationId,
-    pub next: OperationId,
+    pub from_loc: Location,
+    pub to_loc: Location,
+    pub previous: Option<OperationId>,
+    pub next: Option<OperationId>,
     pub presence: Lit,
     pub start: VarCst,
     pub duration: IntCst,
@@ -190,14 +206,26 @@ pub struct Transport {
 }
 #[derive(Clone, Copy, Debug)]
 pub struct TransportWithRobot {
-    pub from_machine: u32,
-    pub to_machine: u32,
-    pub previous: OperationId,
-    pub next: OperationId,
+    pub from_loc: Location,
+    pub to_loc: Location,
+    pub previous: Option<OperationId>,
+    pub next: Option<OperationId>,
     pub robot: u32,
     pub presence: Lit,
     pub start: VarCst,
     pub duration: IntCst,
+}
+
+impl TransportWithRobot {
+    pub fn job(&self) -> u32 {
+        if let Some(prev) = self.previous {
+            prev.job
+        } else if let Some(next) = self.next {
+            next.job
+        } else {
+            panic!("Not attached to any job (no previous/next task...)")
+        }
+    }
 }
 
 /// Encoding of a scheduling problem, where each operation and alternative is associated with its variables in the CSP.
@@ -320,7 +348,7 @@ impl Encoding {
     }
 
     pub fn transports_from(&self, op: OperationId) -> impl Iterator<Item = &Transport> {
-        self.transports().filter(move |t| t.previous == op)
+        self.transports().filter(move |t| t.previous == Some(op))
     }
 
     pub fn transports_with_robots_from(
@@ -330,7 +358,7 @@ impl Encoding {
         self.transports_from(op).flat_map(|t| t.alternatives.iter())
     }
     pub fn transports_to(&self, op: OperationId) -> impl Iterator<Item = &Transport> {
-        self.transports().filter(move |t| t.next == op)
+        self.transports().filter(move |t| t.next == Some(op))
     }
 
     pub fn transports_with_robots_to(
@@ -391,6 +419,56 @@ pub(crate) fn encode(
     for j in pb.jobs() {
         let ops = e.operations_ids(j).collect_vec();
 
+        if !ops.is_empty() {
+            // add a transport task that brings the itemsfrom its initial location to the first machine
+            let item_start = pb.item_start_locations[j as usize];
+            for a1 in e.alternatives(j, *ops.first().unwrap()) {
+                let transport_time = pb
+                    .transport_time(item_start, a1.machine as Location)
+                    .unwrap_or(0);
+                // && transport_time > 0
+                let transport_start = m.new_optional_var(0, pb.makespan_upper_bound(), a1.presence);
+                let transport_end = transport_start + transport_time;
+                let transport = Transport {
+                    from_loc: item_start,
+                    to_loc: a1.machine as Location,
+                    previous: None,
+                    next: Some(a1.id),
+                    presence: a1.presence,
+                    start: transport_start.into(),
+                    duration: transport_time as IntCst,
+                    alternatives: Default::default(),
+                };
+                transports.push(transport);
+                m.enforce_scoped(leq(transport_end, a1.start), [a1.presence]);
+            }
+
+            // if the item has a required final location. Add a transfropt from its last op to this target location.
+            if let Some(item_end) = pb.item_end_locations[j as usize] {
+                for alt in e.alternatives(j, *ops.last().unwrap()) {
+                    let transport_time = pb
+                        .transport_time(alt.machine as Location, item_end)
+                        .unwrap_or(0);
+                    // && transport_time > 0
+                    let transport_start =
+                        m.new_optional_var(0, pb.makespan_upper_bound(), alt.presence);
+                    let transport_end = transport_start + transport_time;
+                    let transport = Transport {
+                        from_loc: alt.machine as Location,
+                        to_loc: item_end,
+                        previous: Some(alt.id),
+                        next: None,
+                        presence: alt.presence,
+                        start: transport_start.into(),
+                        duration: transport_time as IntCst,
+                        alternatives: Default::default(),
+                    };
+                    transports.push(transport);
+                    m.enforce_scoped(leq(alt.end(), transport_start), [alt.presence]);
+                }
+            }
+        }
+
         for i in 1..ops.len() {
             let op1 = ops[i - 1];
             let op2 = ops[i];
@@ -403,7 +481,8 @@ pub(crate) fn encode(
             // These are machine-dependent and thus placed between any pair of alternatives
             for a1 in e.alternatives(j, op1) {
                 for a2 in e.alternatives(j, op2) {
-                    if let Some(transport_time) = pb.transport_time(a1.machine, a2.machine)
+                    if let Some(transport_time) =
+                        pb.transport_time(a1.machine as Location, a2.machine as Location)
                     // && transport_time > 0
                     {
                         let both_present = m.conjunctive_scope(&[a1.presence, a2.presence]);
@@ -411,10 +490,10 @@ pub(crate) fn encode(
                             m.new_optional_var(0, pb.makespan_upper_bound(), both_present);
                         let transport_end = transport_start + transport_time;
                         let transport = Transport {
-                            from_machine: a1.machine,
-                            to_machine: a2.machine,
-                            previous: a1.id,
-                            next: a2.id,
+                            from_loc: a1.machine as Location,
+                            to_loc: a2.machine as Location,
+                            previous: Some(a1.id),
+                            next: Some(a2.id),
                             presence: both_present,
                             start: transport_start.into(),
                             duration: transport_time as IntCst,
@@ -437,8 +516,8 @@ pub(crate) fn encode(
             let start = m.new_optional_variable(0, pb.makespan_upper_bound(), present);
 
             let transport_by_robot = TransportWithRobot {
-                from_machine: t.from_machine,
-                to_machine: t.to_machine,
+                from_loc: t.from_loc,
+                to_loc: t.to_loc,
                 previous: t.previous,
                 next: t.next,
                 robot: r as u32,
@@ -458,6 +537,31 @@ pub(crate) fn encode(
         // for this robots, ensure that for any two transport tasks, they are not overlapping and
         // there is sufficient delay between to allow the robot to move from the first's final machine to the second's start machine
         for (i, transport_i) in transports_of_robots[r].iter().enumerate() {
+            // enforce that the transport may not start before the robot can get there from its initial location
+            let start_loc = pb.robot_start_locations[r];
+            let travel_time_from_start = pb
+                .transport_time(start_loc as Location, transport_i.from_loc as Location)
+                .unwrap_or(0) as IntCst;
+            m.enforce_scoped(
+                geq(transport_i.start, travel_time_from_start),
+                [transport_i.presence],
+            );
+
+            // if the robot has a required end location, make sure the time required to get back there
+            // is accounted for in the makespan
+            if let Some(end_loc) = pb.robot_end_locations[r] {
+                let travel_time_to_end = pb
+                    .transport_time(transport_i.to_loc as Location, end_loc)
+                    .unwrap_or(0);
+                m.enforce_scoped(
+                    geq(
+                        e.makespan,
+                        transport_i.start + transport_i.duration + travel_time_to_end,
+                    ),
+                    [transport_i.presence],
+                );
+            }
+
             for transport_j in &transports_of_robots[r][i + 1..] {
                 m.enforce_scoped(
                     // one of those two must be satisfied
@@ -466,22 +570,16 @@ pub(crate) fn encode(
                         leq(
                             transport_i.start
                                 + transport_i.duration
-                                + pb.transport_time(
-                                    transport_i.to_machine,
-                                    transport_j.from_machine,
-                                )
-                                .unwrap(),
+                                + pb.transport_time(transport_i.to_loc, transport_j.from_loc)
+                                    .unwrap(),
                             transport_j.start,
                         ),
                         // start(tj) + dur(tj) + tt(mj, mi) <= start(ti)
                         leq(
                             transport_j.start
                                 + transport_j.duration
-                                + pb.transport_time(
-                                    transport_j.to_machine,
-                                    transport_i.from_machine,
-                                )
-                                .unwrap(),
+                                + pb.transport_time(transport_j.to_loc, transport_i.from_loc)
+                                    .unwrap(),
                             transport_i.start,
                         ),
                     ),

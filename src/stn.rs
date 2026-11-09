@@ -22,7 +22,7 @@
 //! The makespan bound is NOT included as a constraint: its value is exported separately so
 //! that the consumer can choose the deadline (e.g. the solution makespan, or a relaxed one).
 
-use crate::problem::{Encoding, OperationId, Problem};
+use crate::problem::{Encoding, Location, OperationId, Problem};
 use aries_solver::prelude::*;
 use itertools::Itertools;
 use std::collections::HashMap;
@@ -70,7 +70,8 @@ pub fn export_stn(solution: &Solution, pb: &Problem, e: &Encoding) -> String {
 
     // ---- operations (selected alternative only)
     let mut op_tps: HashMap<OperationId, (usize, usize)> = HashMap::new();
-    let mut ops_on_machine: Vec<Vec<(IntCst, usize, usize)>> = vec![Vec::new(); pb.num_machines as usize];
+    let mut ops_on_machine: Vec<Vec<(IntCst, usize, usize)>> =
+        vec![Vec::new(); pb.num_machines as usize];
 
     for job in pb.jobs() {
         let mut prev_end: Option<usize> = None;
@@ -115,26 +116,44 @@ pub fn export_stn(solution: &Solution, pb: &Problem, e: &Encoding) -> String {
         };
         let start = solution.eval(tr.start).unwrap();
         let end = start + tr.duration;
-        let name = format!("r{}_j{}_o{}", tr.robot, tr.next.job, tr.next.op);
+        let name = if let Some(next) = tr.next {
+            format!("r{}_j{}_o{}", tr.robot, next.job, next.op)
+        } else {
+            format!("r{}_j{}_o{}", tr.robot, tr.job(), "to-depot")
+        };
         let pick = stn.timepoint(format!("{name}_pickup"), start);
         let drop = stn.timepoint(format!("{name}_drop"), end);
 
         stn.add(origin, pick, Some(0), None);
         stn.add(pick, drop, Some(tr.duration), None);
-        stn.add(op_tps[&tr.previous].1, pick, Some(0), None);
-        stn.add(drop, op_tps[&tr.next].0, Some(0), None);
+        if let Some(previous) = tr.previous {
+            stn.add(op_tps[&previous].1, pick, Some(0), None);
+        }
+        if let Some(next) = tr.next {
+            stn.add(drop, op_tps[&next].0, Some(0), None);
+        }
 
-        transports_of_robot[tr.robot as usize].push((start, end, tr.from_machine, tr.to_machine, pick, drop));
+        transports_of_robot[tr.robot as usize].push((
+            start,
+            end,
+            tr.from_loc as u32,
+            tr.to_loc as u32,
+            pick,
+            drop,
+        ));
     }
 
     // ---- robot order (as chosen in the solution) + waypoint sequences
+    // TODO: may need additional entry for the robot to move from/to its start/end location
     let mut waypoints: Vec<Vec<Waypoint>> = Vec::new();
     for transports in &mut transports_of_robot {
         transports.sort();
         for (ti, tj) in transports.iter().copied().tuple_windows() {
             let (_, _, _, to_i, _, drop_i) = ti;
             let (_, _, from_j, _, pick_j, _) = tj;
-            let empty_travel = pb.transport_time(to_i, from_j).unwrap() as IntCst;
+            let empty_travel = pb
+                .transport_time(to_i as Location, from_j as Location)
+                .unwrap() as IntCst;
             stn.add(drop_i, pick_j, Some(empty_travel), None);
         }
         waypoints.push(
@@ -142,8 +161,14 @@ pub fn export_stn(solution: &Solution, pb: &Problem, e: &Encoding) -> String {
                 .iter()
                 .flat_map(|&(_, _, from, to, pick, drop)| {
                     [
-                        Waypoint { machine: from, timepoint: pick },
-                        Waypoint { machine: to, timepoint: drop },
+                        Waypoint {
+                            machine: from,
+                            timepoint: pick,
+                        },
+                        Waypoint {
+                            machine: to,
+                            timepoint: drop,
+                        },
                     ]
                 })
                 .collect(),
@@ -182,7 +207,12 @@ fn to_json(stn: &Stn, waypoints: &[Vec<Waypoint>], makespan: IntCst) -> String {
         .map(|wps| {
             let items = wps
                 .iter()
-                .map(|w| format!("{{\"machine\": {}, \"timepoint\": {}}}", w.machine, w.timepoint))
+                .map(|w| {
+                    format!(
+                        "{{\"machine\": {}, \"timepoint\": {}}}",
+                        w.machine, w.timepoint
+                    )
+                })
                 .join(", ");
             format!("    [{items}]")
         })
